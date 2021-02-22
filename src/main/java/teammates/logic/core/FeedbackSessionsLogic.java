@@ -1,30 +1,8 @@
 package teammates.logic.core;
 
-import java.time.Instant;
-import java.time.ZoneId;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
-
-import javax.annotation.Nullable;
-
 import teammates.Globals;
-import teammates.common.datatransfer.AttributesDeletionQuery;
-import teammates.common.datatransfer.CourseRoster;
-import teammates.common.datatransfer.FeedbackParticipantType;
-import teammates.common.datatransfer.SessionResultsBundle;
-import teammates.common.datatransfer.UserRole;
-import teammates.common.datatransfer.attributes.FeedbackQuestionAttributes;
-import teammates.common.datatransfer.attributes.FeedbackResponseAttributes;
-import teammates.common.datatransfer.attributes.FeedbackResponseCommentAttributes;
-import teammates.common.datatransfer.attributes.FeedbackSessionAttributes;
-import teammates.common.datatransfer.attributes.InstructorAttributes;
-import teammates.common.datatransfer.attributes.StudentAttributes;
+import teammates.common.datatransfer.*;
+import teammates.common.datatransfer.attributes.*;
 import teammates.common.datatransfer.questions.FeedbackTextResponseDetails;
 import teammates.common.exception.EntityAlreadyExistsException;
 import teammates.common.exception.EntityDoesNotExistException;
@@ -34,6 +12,12 @@ import teammates.common.util.Const;
 import teammates.common.util.Logger;
 import teammates.common.util.TimeHelper;
 import teammates.storage.api.FeedbackSessionsDb;
+
+import javax.annotation.Nullable;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Handles operations related to feedback sessions.
@@ -502,6 +486,114 @@ public final class FeedbackSessionsLogic {
         return frLogic.getGiverSetThatAnswerFeedbackSession(fsa.getCourseId(), fsa.getFeedbackSessionName()).size();
     }
 
+
+    private List<FeedbackQuestionAttributes> getQuestion(String questionId, String feedbackSessionName, String courseId) {
+        List<FeedbackQuestionAttributes> allQ;
+        if (questionId == null) {
+            allQ = fqLogic.getFeedbackQuestionsForSession(feedbackSessionName, courseId);
+        } else {
+
+            FeedbackQuestionAttributes fqa = fqLogic.getFeedbackQuestion(questionId);
+            if (fqa == null) {
+
+                allQ = Collections.emptyList();
+            } else {
+                allQ = Collections.singletonList(fqa);
+            }
+        }
+        return allQ;
+    }
+
+    private List<FeedbackResponseAttributes>  getResponses(String questionId, String feedbackSessionName, String courseId, String section) {
+        List<FeedbackResponseAttributes> allR;
+        if (questionId == null) {
+            allR = frLogic.getFeedbackResponsesForSessionInSection(feedbackSessionName, courseId, section);
+        } else {
+            allR = frLogic.getFeedbackResponsesForQuestionInSection(questionId, section);
+        }
+        return allR;
+    }
+
+    private List<FeedbackResponseCommentAttributes> getComments(String questionId, String courseId, String feedbackSessionName, String section) {
+        if (questionId == null) {
+            return frcLogic.getFeedbackResponseCommentForSessionInSection(courseId, feedbackSessionName, section);
+        } else {
+            return frcLogic.getFeedbackResponseCommentForQuestionInSection(questionId, section);
+        }
+    }
+
+    private void buildResponse(
+            List<FeedbackResponseAttributes> allResponses,
+            Map<String, FeedbackQuestionAttributes> allQuestionsMap,
+            String userEmail,
+            UserRole role,
+            StudentAttributes student,
+            Set<String> studentsEmailInTeam,
+            InstructorAttributes instructor,
+            CourseRoster roster,
+            Map<String, FeedbackQuestionAttributes> relatedQuestionsMap,
+            Map<String, FeedbackResponseAttributes> relatedResponsesMap,
+            Map<String, Boolean> responseGiverVisibilityTable,
+            Map<String, Boolean> responseRecipientVisibilityTable) {
+
+        for (FeedbackResponseAttributes response : allResponses) {
+            FeedbackQuestionAttributes correspondingQuestion = allQuestionsMap.get(response.feedbackQuestionId);
+            if (correspondingQuestion == null) {
+                // orphan response without corresponding question, ignore it
+                continue;
+            }
+
+            // check visibility of response
+            boolean isVisibleResponse = isResponseVisibleForUser(
+                    userEmail, role, student, studentsEmailInTeam, response, correspondingQuestion, instructor);
+            if (!isVisibleResponse) {
+                continue;
+            } else {
+            }
+
+            // only if there are viewable responses, the corresponding question becomes related.
+            // this operation is redundant for instructor but necessary for student
+            relatedQuestionsMap.put(response.getFeedbackQuestionId(), correspondingQuestion);
+            relatedResponsesMap.put(response.getId(), response);
+            // generate giver/recipient name visibility table
+            responseGiverVisibilityTable.put(response.getId(),
+                    frLogic.isNameVisibleToUser(correspondingQuestion, response, userEmail, role, true, roster));
+            responseRecipientVisibilityTable.put(response.getId(),
+                    frLogic.isNameVisibleToUser(correspondingQuestion, response, userEmail, role, false, roster));
+        }
+
+    }
+    private void buildComment(
+            List<FeedbackResponseCommentAttributes> allComments,
+            String userEmail,
+            UserRole role,
+            StudentAttributes student,
+            Set<String> studentsEmailInTeam,
+            CourseRoster roster,
+            Map<String, FeedbackQuestionAttributes> relatedQuestionsMap,
+            Map<String, FeedbackResponseAttributes> relatedResponsesMap,
+            Map<String, List<FeedbackResponseCommentAttributes>> relatedCommentsMap,
+            Map<Long, Boolean> commentVisibilityTable){
+
+        for (FeedbackResponseCommentAttributes frc : allComments) {
+            FeedbackResponseAttributes relatedResponse = relatedResponsesMap.get(frc.feedbackResponseId);
+            FeedbackQuestionAttributes relatedQuestion = relatedQuestionsMap.get(frc.feedbackQuestionId);
+            // the comment needs to be relevant to the question and response
+            if (relatedQuestion == null || relatedResponse == null) {
+                continue;
+            }
+            // check visibility of comment
+            boolean isVisibleResponseComment = frcLogic.isResponseCommentVisibleForUser(
+                    userEmail, role, student, studentsEmailInTeam, relatedResponse, relatedQuestion, frc);
+            if (!isVisibleResponseComment) {
+                continue;
+            }
+
+            relatedCommentsMap.computeIfAbsent(relatedResponse.getId(), key -> new ArrayList<>()).add(frc);
+            // generate comment giver name visibility table
+            commentVisibilityTable.put(frc.getId(), frcLogic.isNameVisibleToUser(frc, relatedResponse, userEmail, roster));
+        }
+    }
     /**
      * Gets the session result for a feedback session.
      *
@@ -509,8 +601,8 @@ public final class FeedbackSessionsLogic {
      * @param courseId the ID of the course
      * @param userEmail the user viewing the feedback session
      * @param role the role of the use
-     * @param questionId if not null, will only return partial bundle for the question
      * @param section if not null, will only return partial bundle for the section
+     * @param questionId if not null, will only return partial bundle for the question
      * @return the session result bundle
      */
     public SessionResultsBundle getSessionResultsForUser(
@@ -528,20 +620,7 @@ public final class FeedbackSessionsLogic {
         // load question(s)
         List<FeedbackQuestionAttributes> allQuestions;
         Map<String, FeedbackQuestionAttributes> allQuestionsMap = new HashMap<>();
-        if (questionId == null) {
-            list.set(1, true);
-            allQuestions = fqLogic.getFeedbackQuestionsForSession(feedbackSessionName, courseId);
-        } else {
-            list.set(2, true);
-            FeedbackQuestionAttributes fqa = fqLogic.getFeedbackQuestion(questionId);
-            if (fqa == null) {
-                list.set(3, true);
-                allQuestions = Collections.emptyList();
-            } else {
-                list.set(4, true);
-                allQuestions = Collections.singletonList(fqa);
-            }
-        }
+        allQuestions = getQuestion(questionId, feedbackSessionName, courseId);
         for (FeedbackQuestionAttributes qn : allQuestions) {
             allQuestionsMap.put(qn.getId(), qn);
         }
@@ -550,15 +629,7 @@ public final class FeedbackSessionsLogic {
         StudentAttributes student = getStudent(courseId, userEmail, role);
         List<FeedbackResponseAttributes> allResponses;
         if (isInstructor(role)) {
-            list.set(5, true);
-            // load all response for instructors and passively filter them later
-            if (questionId == null) {
-                list.set(6, true);
-                allResponses = frLogic.getFeedbackResponsesForSessionInSection(feedbackSessionName, courseId, section);
-            } else {
-                list.set(7, true);
-                allResponses = frLogic.getFeedbackResponsesForQuestionInSection(questionId, section);
-            }
+            allResponses = getResponses(questionId, feedbackSessionName, courseId, section);
         } else {
             list.set(8, true);
             if (section != null) {
@@ -579,13 +650,8 @@ public final class FeedbackSessionsLogic {
 
         // load comment(s)
         List<FeedbackResponseCommentAttributes> allComments;
-        if (questionId == null) {
-            list.set(11, true);
-            allComments = frcLogic.getFeedbackResponseCommentForSessionInSection(courseId, feedbackSessionName, section);
-        } else {
-            list.set(12, true);
-            allComments = frcLogic.getFeedbackResponseCommentForQuestionInSection(questionId, section);
-        }
+        allComments = getComments(questionId, courseId, feedbackSessionName, section);
+
 
         // related questions, responses, and comment
         Map<String, FeedbackQuestionAttributes> relatedQuestionsMap = new HashMap<>();
@@ -612,61 +678,35 @@ public final class FeedbackSessionsLogic {
         Map<Long, Boolean> commentVisibilityTable = new HashMap<>();
 
         // build response
-        for (FeedbackResponseAttributes response : allResponses) {
-            FeedbackQuestionAttributes correspondingQuestion = allQuestionsMap.get(response.feedbackQuestionId);
-            if (correspondingQuestion == null) {
-                list.set(15, true); 
-                // orphan response without corresponding question, ignore it
-                continue;
-            } else {
-                list.set(16, true);
-            }
-            // check visibility of response
-            boolean isVisibleResponse = isResponseVisibleForUser(
-                    userEmail, role, student, studentsEmailInTeam, response, correspondingQuestion, instructor);
-            if (!isVisibleResponse) {
-                list.set(17, true);
-                continue;
-            } else {
-                list.set(18, true);
-            }
-
-            // only if there are viewable responses, the corresponding question becomes related.
-            // this operation is redundant for instructor but necessary for student
-            relatedQuestionsMap.put(response.getFeedbackQuestionId(), correspondingQuestion);
-            relatedResponsesMap.put(response.getId(), response);
-            // generate giver/recipient name visibility table
-            responseGiverVisibilityTable.put(response.getId(),
-                    frLogic.isNameVisibleToUser(correspondingQuestion, response, userEmail, role, true, roster));
-            responseRecipientVisibilityTable.put(response.getId(),
-                    frLogic.isNameVisibleToUser(correspondingQuestion, response, userEmail, role, false, roster));
-        }
+        buildResponse(
+                 allResponses,
+                allQuestionsMap,
+                userEmail,
+                role,
+                student,
+                studentsEmailInTeam,
+                instructor,
+                roster,
+                relatedQuestionsMap,
+                relatedResponsesMap,
+                responseGiverVisibilityTable,
+                responseRecipientVisibilityTable
+        );
 
         // build comment
-        for (FeedbackResponseCommentAttributes frc : allComments) {
-            FeedbackResponseAttributes relatedResponse = relatedResponsesMap.get(frc.feedbackResponseId);
-            FeedbackQuestionAttributes relatedQuestion = relatedQuestionsMap.get(frc.feedbackQuestionId);
-            // the comment needs to be relevant to the question and response
-            if (relatedQuestion == null || relatedResponse == null) {
-                list.set(19, true);
-                continue;
-            } else {
-                list.set(20, true);
-            }
-            // check visibility of comment
-            boolean isVisibleResponseComment = frcLogic.isResponseCommentVisibleForUser(
-                    userEmail, role, student, studentsEmailInTeam, relatedResponse, relatedQuestion, frc);
-            if (!isVisibleResponseComment) {
-                list.set(21, true);
-                continue;
-            } else {
-                list.set(22, true);
-            }
+        buildComment(
+                allComments,
+                userEmail,
+                role,
+                student,
+                studentsEmailInTeam,
+                roster,
+                relatedQuestionsMap,
+                relatedResponsesMap,
+                relatedCommentsMap,
+                commentVisibilityTable
+        );
 
-            relatedCommentsMap.computeIfAbsent(relatedResponse.getId(), key -> new ArrayList<>()).add(frc);
-            // generate comment giver name visibility table
-            commentVisibilityTable.put(frc.getId(), frcLogic.isNameVisibleToUser(frc, relatedResponse, userEmail, roster));
-        }
 
         List<FeedbackResponseAttributes> existingResponses = new ArrayList<>(relatedResponsesMap.values());
         List<FeedbackResponseAttributes> missingResponses = Collections.emptyList();
